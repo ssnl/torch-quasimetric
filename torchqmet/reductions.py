@@ -81,6 +81,176 @@ class MaxMean(ReductionBase):
         )
 
 
+class MaxL12(ReductionBase):
+    def __init__(self, input_num_components: int, discount: Optional[float] = None) -> None:
+        super().__init__(input_num_components=input_num_components, discount=discount)
+        self.raw_alpha = nn.Parameter(torch.tensor([1, 1, 1], dtype=torch.float32).requires_grad_())  # pre normalizing
+        self.ws = nn.Parameter(torch.zeros(3, input_num_components, requires_grad=True))
+        # self._raw_alpha_version = self.raw_alpha._version
+        self.register_buffer('normalization', torch.tensor([1, 1, input_num_components ** 0.5], dtype=torch.float32))
+
+    def compute_alpha(self) -> torch.Tensor:
+        # if self._raw_alpha_version != self.raw_alpha._version:
+            # with torch.no_grad():
+            #     self.raw_alpha.relu_()
+            # self._raw_alpha_version = self.raw_alpha._version
+        self.raw_alpha.data.relu_()  # version is not reliable, with .data not modifying the version
+        alpha: torch.Tensor = self.raw_alpha / self.raw_alpha.sum().add(1e-5)
+        return alpha
+
+    def forward(self, d: torch.Tensor) -> torch.Tensor:
+        w0, w1, w2 = self.ws.exp().unbind(0)
+        w0 = w1 = w2 = 1
+        return torch.stack([
+            (d * w0).max(dim=-1).values,
+            (d * w1).mean(dim=-1),
+            (d * w2).norm(p=2, dim=-1),
+        ], dim=-1) @ (self.compute_alpha() / self.normalization)
+
+
+class MaxL12_sm(ReductionBase):
+    def __init__(self, input_num_components: int, discount: Optional[float] = None) -> None:
+        super().__init__(input_num_components=input_num_components, discount=discount)
+        self.raw_alpha = nn.Parameter(torch.tensor([0., 0., 0.], dtype=torch.float32).requires_grad_())  # pre normalizing
+        self.register_buffer('normalization', torch.tensor([1, 1, input_num_components ** 0.5], dtype=torch.float32))
+
+    def compute_alpha(self) -> torch.Tensor:
+        return self.raw_alpha.softmax(dim=-1)
+
+    def forward(self, d: torch.Tensor) -> torch.Tensor:
+        return torch.stack([
+            (d).max(dim=-1).values,
+            (d).mean(dim=-1),
+            (d).norm(p=2, dim=-1),
+        ], dim=-1) @ (self.compute_alpha() / self.normalization)
+    
+
+
+class MaxL12_PGsm(ReductionBase):
+    # last_p: torch.Tensor
+    last_logp: torch.Tensor
+    on_pi: bool
+    
+    def __init__(self, input_num_components: int, discount: Optional[float] = None) -> None:
+        super().__init__(input_num_components=input_num_components, discount=discount)
+        self.raw_alpha = nn.Parameter(torch.tensor([0., 0., 0., 0.], dtype=torch.float32).requires_grad_())  # pre normalizing
+        self.raw_alpha_w = nn.Parameter(torch.tensor([0., 0., 0.], dtype=torch.float32).requires_grad_())  # pre normalizing
+        self.last_logp = None
+        self.on_pi = True
+        # self.last_p = None
+
+    def compute_alpha(self) -> torch.Tensor:
+        return self.raw_alpha.softmax(dim=-1)
+
+    def compute_alpha_logits(self) -> torch.Tensor:
+        return self.raw_alpha
+
+    def compute_alpha_w(self) -> torch.Tensor:
+        # self.raw_alpha_w.data.clamp_(0.01, 0.99)
+        # # alpha: torch.Tensor = self.raw_alpha_w.add(0.1) / self.raw_alpha_w.sum().add(0.3)
+        # alpha: torch.Tensor = self.raw_alpha_w / self.raw_alpha_w.sum()
+        alpha = self.raw_alpha_w.softmax(-1)
+        return alpha
+
+    def forward(self, d: torch.Tensor) -> torch.Tensor:
+        ds = torch.stack([
+            (d).max(dim=-1).values,
+            (d).mean(dim=-1),
+            (d).norm(p=2, dim=-1).div(self.input_num_components ** 0.5),
+        ], dim=-1) 
+        ds = torch.cat([
+            ds,
+            (ds @ self.compute_alpha_w())[..., None],
+        ], dim=-1)
+        
+        if self.training:
+            distn = torch.distributions.categorical.Categorical(
+                logits=self.compute_alpha_logits(), validate_args=False)
+            if self.on_pi:
+                idx = distn.sample(d.shape[:-1])
+            else:
+                idx = torch.randint(self.raw_alpha.shape[0], size=d.shape[:-1], device=d.device)
+            # self.last_p = distn.prob(idx)
+            self.last_logp = distn.log_prob(idx)
+            return torch.gather(
+                ds, 
+                index=idx[..., None], 
+                dim=-1,
+            ).squeeze(-1)
+        else:
+            idx = self.raw_alpha.argmax()
+            return ds[..., idx]
+
+
+class MaxL12_PG(MaxL12_PGsm):
+    def __init__(self, input_num_components: int, discount: Optional[float] = None) -> None:
+        super().__init__(input_num_components, discount)
+        with torch.no_grad():
+            # self.raw_alpha.fill_(0.01)
+            self.raw_alpha_w.fill_(1)
+
+    # def compute_alpha(self) -> torch.Tensor:
+    #     self.raw_alpha.data.clamp_min_(1e-2)  # version is not reliable, with .data not modifying the version
+    #     alpha: torch.Tensor = self.raw_alpha / self.raw_alpha.sum()
+    #     return alpha
+
+    # def compute_alpha_logits(self) -> torch.Tensor:
+    #     return self.compute_alpha().log()
+
+    def compute_alpha_w(self) -> torch.Tensor:
+        self.raw_alpha_w.data.clamp_min_(1e-2)  # version is not reliable, with .data not modifying the version
+        alpha: torch.Tensor = self.raw_alpha_w / self.raw_alpha_w.sum()
+        return alpha
+
+
+
+class MaxL12_PG3(ReductionBase):
+    # last_p: torch.Tensor
+    last_logp: torch.Tensor
+    on_pi: bool
+    
+    def __init__(self, input_num_components: int, discount: Optional[float] = None) -> None:
+        super().__init__(input_num_components=input_num_components, discount=discount)
+        self.raw_alpha = nn.Parameter(torch.tensor([0., 0., 0.], dtype=torch.float32).requires_grad_())  # pre normalizing
+        self.raw_alpha_w = torch.tensor([], dtype=torch.float32)  # just to make logging easier
+        self.last_logp = None
+        self.on_pi = True
+        # self.last_p = None
+
+    def compute_alpha(self) -> torch.Tensor:
+        return self.raw_alpha.softmax(dim=-1)
+
+    def compute_alpha_logits(self) -> torch.Tensor:
+        return self.raw_alpha
+
+    def compute_alpha_w(self) -> torch.Tensor:
+        return self.raw_alpha_w
+
+    def forward(self, d: torch.Tensor) -> torch.Tensor:
+        ds = torch.stack([
+            (d).max(dim=-1).values,
+            (d).mean(dim=-1),
+            (d).norm(p=2, dim=-1).div(self.input_num_components ** 0.5),
+        ], dim=-1)
+        
+        if self.training:
+            distn = torch.distributions.categorical.Categorical(
+                logits=self.compute_alpha_logits(), validate_args=False)
+            if self.on_pi:
+                idx = distn.sample(d.shape[:-1])
+            else:
+                idx = torch.randint(self.raw_alpha.shape[0], size=d.shape[:-1], device=d.device)
+            # self.last_p = distn.prob(idx)
+            self.last_logp = distn.log_prob(idx)
+            return torch.gather(
+                ds, 
+                index=idx[..., None], 
+                dim=-1,
+            ).squeeze(-1)
+        else:
+            return ds @ self.compute_alpha()
+    
+
 class DeepLinearNetWeightedSum(ReductionBase):
     r'''
     PQE-style aggregation by weighted sum from deep linear networks:
@@ -144,6 +314,11 @@ REDUCTIONS: Mapping[str, Type[ReductionBase]] = dict(
     sum=Sum,
     mean=Mean,
     maxmean=MaxMean,
+    maxl12=MaxL12,
+    maxl12_sm=MaxL12_sm,
+    maxl12_pg=MaxL12_PG,
+    maxl12_pg3=MaxL12_PG3,
+    maxl12_pgsm=MaxL12_PGsm,
     max=Max,
     deep_linear_net_weighted_sum=DeepLinearNetWeightedSum,
 )

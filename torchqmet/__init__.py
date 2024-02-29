@@ -64,7 +64,7 @@ class QuasimetricBase(nn.Module, metaclass=abc.ABCMeta):
 
 
 from .pqe import PQE, PQELH, PQEGG
-from .iqe import IQE
+from .iqe import IQE, IQE2
 from .mrn import MRN, MRNFixed
 from .neural_norms import DeepNorm, WideNorm
 

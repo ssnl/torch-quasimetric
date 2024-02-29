@@ -6,11 +6,52 @@ https://arxiv.org/abs/2211.15120
 from typing import *
 
 import torch
+import math
 
 from . import QuasimetricBase
 
+# The PQELH function.
 
 @torch.jit.script
+def f_PQELH(h: torch.Tensor):  # PQELH: strictly monotonically increasing mapping from [0, +infty) -> [0, 1)
+    return -torch.expm1(-h)
+
+def iqe_tensor_delta(x: torch.Tensor, y: torch.Tensor, delta: torch.Tensor, div_pre_f: torch.Tensor, mul_kind: str) -> torch.Tensor:
+    D = x.shape[-1]  # D: component_dim
+
+    # ignore pairs that x >= y
+    valid = (x < y)
+
+    # sort to better count
+    xy = torch.cat(torch.broadcast_tensors(x, y), dim=-1)
+    sxy, ixy = xy.sort(dim=-1)
+
+    # neg_inc: the **negated** increment of **input** of f at sorted locations
+    # inc = torch.gather(delta * valid, dim=-1, index=ixy % D) * torch.where(ixy < D, 1, -1)
+    neg_inc = torch.gather(delta * valid, dim=-1, index=ixy % D) * torch.where(ixy < D, -1, 1)
+
+    # neg_incf: the **negated** increment of **output** of f at sorted locations
+    neg_f = torch.expm1(torch.cumsum(neg_inc, dim=-1) / div_pre_f[:, None])
+    neg_incf = torch.cat([neg_f.narrow(-1, 0, 1), torch.diff(neg_f, dim=-1)], dim=-1)
+
+    # reduction
+    if neg_incf.ndim == 3:
+        comp = torch.einsum('bkd,bkd->bk', sxy, neg_incf)
+    else:
+        comp = (sxy * neg_incf).sum(-1)
+
+    if mul_kind == 'undiv':
+        comp = comp * div_pre_f
+    elif mul_kind == 'normdiv':
+        comp = comp / f_PQELH(D / 8 / div_pre_f)
+    elif mul_kind == 'normdiv_half':
+        comp = comp * 2 / f_PQELH(D / 8 / div_pre_f)
+    else:
+        assert mul_kind == 'none'
+    return comp
+
+
+
 def iqe(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     D = x.shape[-1]  # D: dim_per_component
 
@@ -42,6 +83,14 @@ def iqe(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     return (sxy * neg_incf).sum(-1)
 
 
+if torch.__version__ >= '2.0.1' and False:  # well, broken process pool in notebooks
+    iqe = torch.compile(iqe)
+    # iqe = torch.compile(iqe, dynamic=True)
+else:
+    iqe = torch.jit.script(iqe)
+    iqe_tensor_delta = torch.jit.script(iqe_tensor_delta)
+
+
 class IQE(QuasimetricBase):
     r'''
     Inteval Quasimetric Embedding (IQE):
@@ -52,13 +101,13 @@ class IQE(QuasimetricBase):
         IQE(input_size: int, dim_per_component: int = 16, ...)
 
 
-    Default arguments implements IQE-maxmean. Set `reduction="sum"` to create IQE-sum.
+    Default arguments implement IQE-maxmean. Set `reduction="sum"` to create IQE-sum.
 
     IQE-Specific Args:
         input_size (int): Dimension of input latent vectors
-        dim_per_component (int): IQE splits latent vectors into chunks, where ach chunk computes gives an IQE component.
+        dim_per_component (int): IQE splits latent vectors into chunks, where each chunk computes gives an IQE component.
                                  This is the number of latent dimensions assigned to each chunk. This number must
-                                 perfectly divide ``input_size``. IQE paper recomments at least ``8``.
+                                 perfectly divide ``input_size``. IQE paper recommends at least ``8``.
                                  Default: ``16``.
 
     Common Args (Exist for all quasimetrics, **Keyword-only**, Default values may be different for different quasimetrics):
@@ -74,7 +123,7 @@ class IQE(QuasimetricBase):
                            + "mean": Average of components.
                            + "maxmean": Convex combination of max and mean. Used in original Deep Norm, Wide Norm, and IQE.
                            + "deep_linear_net_weighted_sum": Weighted sum with weights given by a deep linear net. Used in
-                                                             original PQE, whose components have limited range [0, 1).
+                                                             original PQE, whose components have a limited range [0, 1).
                          Default: ``"maxmean"``.
         discounted (Optional[float]): If not ``None``, this module instead estimates discounted distances with the
                                       base as ``discounted``.
@@ -138,3 +187,164 @@ class IQE(QuasimetricBase):
             x=x.unflatten(-1, self.latent_2d_shape),
             y=y.unflatten(-1, self.latent_2d_shape),
         )
+
+
+class IQE2(IQE):
+    component_dropout_thresh: Tuple[float, float]  # multiplied with 1/num_components
+    dropout_p_thresh: Tuple[float, float]
+    dropout_batch_frac: float
+    div_init_mul: float
+    ema_weight: float
+    ema_usage: torch.Tensor
+
+    raw_delta: Optional[torch.Tensor]
+    raw_div: torch.Tensor
+    mul_kind: str
+
+    last_components: torch.Tensor
+    last_drop_p: torch.Tensor
+
+    def __init__(self, input_size: int, dim_per_component: int = 16, *,
+                 transforms: Collection[str] = (), reduction: str = 'maxmean',
+                 discount: Optional[float] = None, warn_if_not_quasimetric: bool = True,
+                 learned_delta: bool = False, learned_div: bool = False,
+                 div_init_mul: Optional[float] = None,  # exp( mul * dim_per_comp )
+                 mul_kind: str = 'undiv',
+                 component_dropout_thresh: Tuple[float, float] = (0.5, 2),
+                 dropout_p_thresh: Tuple[float, float] = (0.005, 0.995),
+                 dropout_batch_frac: float = 0.2,
+                 ema_weight: float = 0.95):
+        super().__init__(input_size, dim_per_component, transforms=transforms, reduction=reduction,
+                         discount=discount, warn_if_not_quasimetric=warn_if_not_quasimetric)
+        self.component_dropout_thresh = tuple(component_dropout_thresh)
+        self.dropout_p_thresh = tuple(dropout_p_thresh)
+        self.dropout_batch_frac = float(dropout_batch_frac)
+        assert 0 <= self.dropout_batch_frac <= 1
+        self.ema_weight = float(ema_weight)
+        assert 0 <= self.ema_weight <= 1
+        self.register_buffer('ema_usage', torch.ones(self.num_components) / self.num_components)
+
+        if learned_delta:
+            # self.register_parameter(
+            #     'raw_delta',
+            #     torch.nn.Parameter(
+            #         torch.zeros(self.latent_2d_shape).sub_(math.log(dim_per_component)).requires_grad_()
+            #     )
+            # )
+            self.register_parameter(
+                'raw_delta',
+                torch.nn.Parameter(
+                    torch.zeros(self.latent_2d_shape).requires_grad_()
+                )
+            )
+        else:
+            assert not learned_div
+            self.register_parameter(
+                'raw_delta',
+                None,
+            )
+
+        if learned_div:
+            if div_init_mul is None:
+                div_init_mul = 2
+
+            self.register_parameter(
+                'raw_div',
+                torch.nn.Parameter(
+                    torch.zeros(self.num_components).add_(math.log(div_init_mul * dim_per_component)).requires_grad_()
+                )
+            )
+        else:
+            self.register_buffer(
+                'raw_div',
+                torch.zeros(1),
+            )
+            if div_init_mul is None:
+                div_init_mul = 1 / dim_per_component
+            else:
+                self.raw_div.add_(math.log(div_init_mul * dim_per_component))
+
+        self.div_init_mul = div_init_mul
+        self.mul_kind = mul_kind
+        self.last_components = None
+        self.last_drop_p = None
+
+
+    def compute_components(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        if self.raw_delta is None:
+            components = super().compute_components(x, y)
+        else:
+
+            components = iqe_tensor_delta(
+                x=x.unflatten(-1, self.latent_2d_shape),
+                y=y.unflatten(-1, self.latent_2d_shape),
+                delta=self.raw_delta.exp(),
+                div_pre_f=self.raw_div.exp(),
+                mul_kind=self.mul_kind,
+            )
+
+        # scale = self.ema_usage ** (-0.5)
+        # scale /= scale.mean()
+
+        # components = components * scale
+
+        if self.training:
+            bshape = components.shape[:-1]
+            bsz = components[..., 0].numel()
+            components = components.reshape(bsz, self.num_components)
+
+            # 1. compute argmax before droput
+            comp_indices = components.argmax(dim=-1)
+
+            # # 2. do dropout
+            # drop_bsz = int(bsz * self.dropout_batch_frac)
+            # with torch.no_grad():
+            #     drop_p = (self.ema_usage * self.num_components - self.component_dropout_thresh[0]).div(
+            #         self.component_dropout_thresh[1] - self.component_dropout_thresh[0] + 1e-5
+            #     ).clamp(*self.dropout_p_thresh)
+            #     self.last_drop_p = drop_p
+            #     keep_p = 1 - drop_p
+
+            #     drop_mask = torch.empty_like(components)
+            #     drop_mask[drop_bsz:].fill_(1)
+            #     torch.bernoulli(
+            #         keep_p.expand(drop_bsz, self.num_components),
+            #         out=drop_mask[:drop_bsz],
+            #     )
+            #     drop_mask = drop_mask[torch.randperm(bsz, device=x.device)]
+            #     # keep_bool.scatter_(
+            #     #     # index=comp.min(dim=-1).indices[..., None],
+            #     #     index=torch.randint(dist_est.num_components, size=(bsz, 1), device=device),
+            #     #     dim=-1,
+            #     #     value=True,
+            #     # )
+            #     # keep_bool[reg_bidx] = True
+
+            # components = components * drop_mask
+
+            # 3. update ema_usage
+            with torch.no_grad():
+                freq = torch.bincount(comp_indices, minlength=self.num_components) / bsz
+                self.ema_usage.lerp_(
+                    end=freq, weight=(1 - self.ema_weight),
+                )
+
+            components = components.reshape(*bshape, self.num_components)
+
+        self.last_components = components
+        return components
+
+    def extra_repr(self) -> str:
+        return super().extra_repr() + rf"""
+component_dropout_thresh={self.component_dropout_thresh},
+dropout_p_thresh={self.dropout_p_thresh},
+dropout_batch_frac={self.dropout_batch_frac:g},
+ema_weight={self.ema_weight:g},
+learned_delta={self.raw_delta is not None},
+learned_div={self.raw_div.requires_grad},
+div_init_mul={self.div_init_mul:g},
+mul_kind={self.mul_kind},
+"""
+
+
+
