@@ -345,6 +345,3 @@ learned_div={self.raw_div.requires_grad},
 div_init_mul={self.div_init_mul:g},
 mul_kind={self.mul_kind},
 """
-
-
-
