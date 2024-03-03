@@ -123,14 +123,23 @@ class MaxL12_sm(ReductionBase):
             (d).mean(dim=-1),
             (d).norm(p=2, dim=-1),
         ], dim=-1) @ (self.compute_alpha() / self.normalization)
-    
+
+
+class MaxL12_sm_scale(MaxL12_sm):
+    def __init__(self, input_num_components: int, discount: Optional[float] = None) -> None:
+        super().__init__(input_num_components=input_num_components, discount=discount)
+        self.raw_scale = nn.Parameter(torch.zeros(()).requires_grad_())
+
+    def compute_alpha(self) -> torch.Tensor:
+        return self.raw_alpha.softmax(dim=-1) * self.raw_scale.exp()
+
 
 
 class MaxL12_PGsm(ReductionBase):
     # last_p: torch.Tensor
     last_logp: torch.Tensor
     on_pi: bool
-    
+
     def __init__(self, input_num_components: int, discount: Optional[float] = None) -> None:
         super().__init__(input_num_components=input_num_components, discount=discount)
         self.raw_alpha = nn.Parameter(torch.tensor([0., 0., 0., 0.], dtype=torch.float32).requires_grad_())  # pre normalizing
@@ -157,12 +166,12 @@ class MaxL12_PGsm(ReductionBase):
             (d).max(dim=-1).values,
             (d).mean(dim=-1),
             (d).norm(p=2, dim=-1).div(self.input_num_components ** 0.5),
-        ], dim=-1) 
+        ], dim=-1)
         ds = torch.cat([
             ds,
             (ds @ self.compute_alpha_w())[..., None],
         ], dim=-1)
-        
+
         if self.training:
             distn = torch.distributions.categorical.Categorical(
                 logits=self.compute_alpha_logits(), validate_args=False)
@@ -173,8 +182,8 @@ class MaxL12_PGsm(ReductionBase):
             # self.last_p = distn.prob(idx)
             self.last_logp = distn.log_prob(idx)
             return torch.gather(
-                ds, 
-                index=idx[..., None], 
+                ds,
+                index=idx[..., None],
                 dim=-1,
             ).squeeze(-1)
         else:
@@ -208,7 +217,7 @@ class MaxL12_PG3(ReductionBase):
     # last_p: torch.Tensor
     last_logp: torch.Tensor
     on_pi: bool
-    
+
     def __init__(self, input_num_components: int, discount: Optional[float] = None) -> None:
         super().__init__(input_num_components=input_num_components, discount=discount)
         self.raw_alpha = nn.Parameter(torch.tensor([0., 0., 0.], dtype=torch.float32).requires_grad_())  # pre normalizing
@@ -232,7 +241,7 @@ class MaxL12_PG3(ReductionBase):
             (d).mean(dim=-1),
             (d).norm(p=2, dim=-1).div(self.input_num_components ** 0.5),
         ], dim=-1)
-        
+
         if self.training:
             distn = torch.distributions.categorical.Categorical(
                 logits=self.compute_alpha_logits(), validate_args=False)
@@ -243,13 +252,13 @@ class MaxL12_PG3(ReductionBase):
             # self.last_p = distn.prob(idx)
             self.last_logp = distn.log_prob(idx)
             return torch.gather(
-                ds, 
-                index=idx[..., None], 
+                ds,
+                index=idx[..., None],
                 dim=-1,
             ).squeeze(-1)
         else:
             return ds @ self.compute_alpha()
-    
+
 
 class DeepLinearNetWeightedSum(ReductionBase):
     r'''
@@ -316,6 +325,7 @@ REDUCTIONS: Mapping[str, Type[ReductionBase]] = dict(
     maxmean=MaxMean,
     maxl12=MaxL12,
     maxl12_sm=MaxL12_sm,
+    maxl12_sm_scale=MaxL12_sm_scale,
     maxl12_pg=MaxL12_PG,
     maxl12_pg3=MaxL12_PG3,
     maxl12_pgsm=MaxL12_PGsm,
