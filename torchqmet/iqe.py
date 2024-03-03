@@ -288,7 +288,7 @@ class IQE2(IQE):
 
         # components = components * scale
 
-        if self.training:
+        if self.training and False:
             bshape = components.shape[:-1]
             bsz = components[..., 0].numel()
             components = components.reshape(bsz, self.num_components)
