@@ -16,7 +16,8 @@ from . import QuasimetricBase
 def f_PQELH(h: torch.Tensor):  # PQELH: strictly monotonically increasing mapping from [0, +infty) -> [0, 1)
     return -torch.expm1(-h)
 
-def iqe_tensor_delta(x: torch.Tensor, y: torch.Tensor, delta: torch.Tensor, div_pre_f: torch.Tensor, mul_kind: str) -> torch.Tensor:
+def iqe_tensor_delta(x: torch.Tensor, y: torch.Tensor, delta: torch.Tensor, div_pre_f: torch.Tensor, mul_kind: str,
+                     fake_grad: bool = True) -> torch.Tensor:
     D = x.shape[-1]  # D: component_dim
 
     # ignore pairs that x >= y
@@ -31,7 +32,16 @@ def iqe_tensor_delta(x: torch.Tensor, y: torch.Tensor, delta: torch.Tensor, div_
     neg_inc = torch.gather(delta * valid, dim=-1, index=ixy % D) * torch.where(ixy < D, -1, 1)
 
     # neg_incf: the **negated** increment of **output** of f at sorted locations
-    neg_f = torch.expm1(torch.cumsum(neg_inc, dim=-1) / div_pre_f[:, None])
+    neg_f_input = torch.cumsum(neg_inc, dim=-1) / div_pre_f[:, None]
+
+    if fake_grad:
+        neg_f_input__grad_path = neg_f_input.clone()
+        neg_f_input__grad_path.data.clamp_(max=17)  # fake grad
+        neg_f_input = neg_f_input__grad_path + (
+            neg_f_input - neg_f_input__grad_path
+        ).detach()
+
+    neg_f = torch.expm1(neg_f_input)
     neg_incf = torch.cat([neg_f.narrow(-1, 0, 1), torch.diff(neg_f, dim=-1)], dim=-1)
 
     # reduction
@@ -44,6 +54,8 @@ def iqe_tensor_delta(x: torch.Tensor, y: torch.Tensor, delta: torch.Tensor, div_
         comp = comp * div_pre_f
     elif mul_kind == 'normdiv':
         comp = comp / f_PQELH(D / 8 / div_pre_f)
+    elif mul_kind == 'normdeltadiv':
+        comp = comp / f_PQELH(delta.expand(x.shape[-2:]).sum(-1) / 8 / div_pre_f)
     elif mul_kind == 'normdiv_half':
         comp = comp * 2 / f_PQELH(D / 8 / div_pre_f)
     else:
@@ -52,7 +64,7 @@ def iqe_tensor_delta(x: torch.Tensor, y: torch.Tensor, delta: torch.Tensor, div_
 
 
 
-def iqe(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+def iqe(x: torch.Tensor, y: torch.Tensor, fake_grad: bool) -> torch.Tensor:
     D = x.shape[-1]  # D: dim_per_component
 
     # ignore pairs that x >= y
@@ -85,6 +97,7 @@ def iqe(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
 
 if torch.__version__ >= '2.0.1' and False:  # well, broken process pool in notebooks
     iqe = torch.compile(iqe)
+    iqe_tensor_delta = torch.compile(iqe_tensor_delta)
     # iqe = torch.compile(iqe, dynamic=True)
 else:
     iqe = torch.jit.script(iqe)
@@ -197,9 +210,10 @@ class IQE2(IQE):
     ema_weight: float
     ema_usage: torch.Tensor
 
-    raw_delta: Optional[torch.Tensor]
+    raw_delta: torch.Tensor
     raw_div: torch.Tensor
     mul_kind: str
+    fake_grad: bool
 
     last_components: torch.Tensor
     last_drop_p: torch.Tensor
@@ -210,6 +224,7 @@ class IQE2(IQE):
                  learned_delta: bool = False, learned_div: bool = False,
                  div_init_mul: Optional[float] = None,  # exp( mul * dim_per_comp )
                  mul_kind: str = 'undiv',
+                 fake_grad: bool = False,
                  component_dropout_thresh: Tuple[float, float] = (0.5, 2),
                  dropout_p_thresh: Tuple[float, float] = (0.005, 0.995),
                  dropout_batch_frac: float = 0.2,
@@ -219,6 +234,7 @@ class IQE2(IQE):
         self.component_dropout_thresh = tuple(component_dropout_thresh)
         self.dropout_p_thresh = tuple(dropout_p_thresh)
         self.dropout_batch_frac = float(dropout_batch_frac)
+        self.fake_grad = fake_grad
         assert 0 <= self.dropout_batch_frac <= 1
         self.ema_weight = float(ema_weight)
         assert 0 <= self.ema_weight <= 1
@@ -238,11 +254,15 @@ class IQE2(IQE):
                 )
             )
         else:
-            assert not learned_div
-            self.register_parameter(
+            self.register_buffer(
                 'raw_delta',
-                None,
+                torch.zeros(()),
             )
+            # assert not learned_div
+            # self.register_parameter(
+            #     'raw_delta',
+            #     None,
+            # )
 
         if learned_div:
             if div_init_mul is None:
@@ -250,9 +270,7 @@ class IQE2(IQE):
 
             self.register_parameter(
                 'raw_div',
-                torch.nn.Parameter(
-                    torch.zeros(self.num_components).add_(math.log(div_init_mul * dim_per_component)).requires_grad_()
-                )
+                torch.nn.Parameter(torch.zeros(self.num_components).requires_grad_())
             )
         else:
             self.register_buffer(
@@ -261,8 +279,9 @@ class IQE2(IQE):
             )
             if div_init_mul is None:
                 div_init_mul = 1 / dim_per_component
-            else:
-                self.raw_div.add_(math.log(div_init_mul * dim_per_component))
+
+        with torch.no_grad():
+            self.raw_div.add_(math.log(div_init_mul * dim_per_component))
 
         self.div_init_mul = div_init_mul
         self.mul_kind = mul_kind
@@ -271,17 +290,23 @@ class IQE2(IQE):
 
 
     def compute_components(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        if self.raw_delta is None:
-            components = super().compute_components(x, y)
-        else:
+        # if self.raw_delta is None:
+        #     components = super().compute_components(x, y)
+        # else:
+        delta = self.raw_delta.exp()
+        div_pre_f = self.raw_div.exp()
+        # cap each component total to 1e3 to avoid overflow, fake gradient
+        delta.data.clamp_(max=1e3 / (self.latent_2d_shape[-1] / 8))
+        div_pre_f.data.clamp_(min=1e-3)
 
-            components = iqe_tensor_delta(
-                x=x.unflatten(-1, self.latent_2d_shape),
-                y=y.unflatten(-1, self.latent_2d_shape),
-                delta=self.raw_delta.exp(),
-                div_pre_f=self.raw_div.exp(),
-                mul_kind=self.mul_kind,
-            )
+        components = iqe_tensor_delta(
+            x=x.unflatten(-1, self.latent_2d_shape),
+            y=y.unflatten(-1, self.latent_2d_shape),
+            delta=delta,
+            div_pre_f=div_pre_f,
+            mul_kind=self.mul_kind,
+            fake_grad=self.fake_grad,
+        )
 
         # scale = self.ema_usage ** (-0.5)
         # scale /= scale.mean()
@@ -344,4 +369,4 @@ learned_delta={self.raw_delta is not None},
 learned_div={self.raw_div.requires_grad},
 div_init_mul={self.div_init_mul:g},
 mul_kind={self.mul_kind},
-"""
+fake_grad={self.fake_grad},"""
