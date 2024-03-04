@@ -64,7 +64,7 @@ def iqe_tensor_delta(x: torch.Tensor, y: torch.Tensor, delta: torch.Tensor, div_
 
 
 
-def iqe(x: torch.Tensor, y: torch.Tensor, fake_grad: bool) -> torch.Tensor:
+def iqe(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     D = x.shape[-1]  # D: dim_per_component
 
     # ignore pairs that x >= y
