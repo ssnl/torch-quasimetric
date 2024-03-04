@@ -18,6 +18,8 @@ class QuasimetricBase(nn.Module, metaclass=abc.ABCMeta):
     transforms: nn.Sequential  # Sequential[TransformBase]
     reduction: ReductionBase
 
+    scale: torch.Tensor  # some non-trainable scale that can be set, if needed
+
     def __init__(self, input_size: int, num_components: int, *,
                  warn_if_not_quasimetric: bool = True, guaranteed_quasimetric: bool,
                  transforms: Collection[str], reduction: str, discount: Optional[float] = None) -> None:
@@ -26,6 +28,7 @@ class QuasimetricBase(nn.Module, metaclass=abc.ABCMeta):
         self.num_components = num_components
         self.guaranteed_quasimetric = guaranteed_quasimetric
         self.discount = discount
+        self.register_buffer('scale', torch.ones(()))
 
         _transforms: List[TransformBase] = []
         for transform in transforms:
@@ -34,8 +37,13 @@ class QuasimetricBase(nn.Module, metaclass=abc.ABCMeta):
         self.transforms = nn.Sequential(*_transforms)
         self.reduction = make_reduction(reduction, num_components, discount)
 
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
+        if prefix + 'scale' not in state_dict:
+            state_dict[prefix + 'scale'] = torch.ones(())  # BC
+        return super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
+
     @abc.abstractmethod
-    def compute_components(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    def compute_components(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         r'''
         Inputs:
             x (torch.Tensor): Shape [..., input_size]
@@ -50,7 +58,7 @@ class QuasimetricBase(nn.Module, metaclass=abc.ABCMeta):
         assert x.shape[-1] == y.shape[-1] == self.input_size
         d = self.compute_components(x, y)
         d: torch.Tensor = self.transforms(d)
-        return self.reduction(d)
+        return self.reduction(d) * self.scale
 
     def __call__(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         # Manually define for typing
