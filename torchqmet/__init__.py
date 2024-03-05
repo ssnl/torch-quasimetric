@@ -58,7 +58,10 @@ class QuasimetricBase(nn.Module, metaclass=abc.ABCMeta):
         assert x.shape[-1] == y.shape[-1] == self.input_size
         d = self.compute_components(x, y)
         d: torch.Tensor = self.transforms(d)
-        return self.reduction(d) * self.scale
+        scale =  self.scale
+        if not self.training:
+            scale = scale.detach()
+        return self.reduction(d) * scale
 
     def __call__(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         # Manually define for typing
