@@ -59,6 +59,11 @@ class Mean(ReductionBase):
         return d.mean(dim=-1)
 
 
+class L2(ReductionBase):
+    def reduce_distance(self, d: torch.Tensor) -> torch.Tensor:
+        return d.norm(p=2, dim=-1)
+
+
 class MaxMean(ReductionBase):
     r'''
     `maxmean` from Neural Norms paper:
@@ -322,6 +327,7 @@ class DeepLinearNetWeightedSum(ReductionBase):
 REDUCTIONS: Mapping[str, Type[ReductionBase]] = dict(
     sum=Sum,
     mean=Mean,
+    l2=L2,
     maxmean=MaxMean,
     maxl12=MaxL12,
     maxl12_sm=MaxL12_sm,
