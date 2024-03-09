@@ -149,7 +149,7 @@ class MaxL12_PGsm(ReductionBase):
         super().__init__(input_num_components=input_num_components, discount=discount)
         self.raw_alpha = nn.Parameter(torch.tensor([0., 0., 0., 0.], dtype=torch.float32).requires_grad_())  # pre normalizing
         self.raw_alpha_w = nn.Parameter(torch.tensor([0., 0., 0.], dtype=torch.float32).requires_grad_())  # pre normalizing
-        self.last_logp = None
+        self.last_logp = None  # type: ignore
         self.on_pi = True
         # self.last_p = None
 
@@ -227,7 +227,7 @@ class MaxL12_PG3(ReductionBase):
         super().__init__(input_num_components=input_num_components, discount=discount)
         self.raw_alpha = nn.Parameter(torch.tensor([0., 0., 0.], dtype=torch.float32).requires_grad_())  # pre normalizing
         self.raw_alpha_w = torch.tensor([], dtype=torch.float32)  # just to make logging easier
-        self.last_logp = None
+        self.last_logp = None  # type: ignore
         self.on_pi = True
         # self.last_p = None
 

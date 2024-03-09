@@ -12,7 +12,6 @@ from . import QuasimetricBase
 
 # The PQELH function.
 
-@torch.jit.script
 def f_PQELH(h: torch.Tensor):  # PQELH: strictly monotonically increasing mapping from [0, +infty) -> [0, 1)
     return -torch.expm1(-h)
 
@@ -21,22 +20,22 @@ def iqe_tensor_delta(x: torch.Tensor, y: torch.Tensor, delta: torch.Tensor, div_
     D = x.shape[-1]  # D: component_dim
 
     # ignore pairs that x >= y
-    valid = (x < y)
+    valid = (x < y)  # [..., K, D]
 
     # sort to better count
-    xy = torch.cat(torch.broadcast_tensors(x, y), dim=-1)
+    xy = torch.cat(torch.broadcast_tensors(x, y), dim=-1)  # [..., K, 2D]
     sxy, ixy = xy.sort(dim=-1)
 
     # neg_inc: the **negated** increment of **input** of f at sorted locations
     # inc = torch.gather(delta * valid, dim=-1, index=ixy % D) * torch.where(ixy < D, 1, -1)
-    neg_inc = torch.gather(delta * valid, dim=-1, index=ixy % D) * torch.where(ixy < D, -1, 1)
+    neg_inc = torch.gather(delta * valid, dim=-1, index=ixy % D) * torch.where(ixy < D, -1, 1)  # [..., K, 2D-sort]
 
     # neg_incf: the **negated** increment of **output** of f at sorted locations
     neg_f_input = torch.cumsum(neg_inc, dim=-1) / div_pre_f[:, None]
 
     if fake_grad:
         neg_f_input__grad_path = neg_f_input.clone()
-        neg_f_input__grad_path.data.clamp_(max=17)  # fake grad
+        neg_f_input__grad_path.data.clamp_(min=-15)  # fake grad
         neg_f_input = neg_f_input__grad_path + (
             neg_f_input - neg_f_input__grad_path
         ).detach()
@@ -95,13 +94,29 @@ def iqe(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     return (sxy * neg_incf).sum(-1)
 
 
-if torch.__version__ >= '2.0.1' and False:  # well, broken process pool in notebooks
-    iqe = torch.compile(iqe)
-    iqe_tensor_delta = torch.compile(iqe_tensor_delta)
+def is_notebook():
+    r"""
+    Inspired by
+    https://github.com/tqdm/tqdm/blob/cc372d09dcd5a5eabdc6ed4cf365bdb0be004d44/tqdm/autonotebook.py
+    """
+    import sys
+    try:
+        get_ipython = sys.modules['IPython'].get_ipython
+        if 'IPKernelApp' not in get_ipython().config:  # pragma: no cover
+            raise ImportError("console")
+    except Exception:
+        return False
+    else:  # pragma: no cover
+        return True
+
+
+if torch.__version__ >= '2.0.1' and not is_notebook():  # well, broken process pool in notebooks
+    iqe = torch.compile(iqe, mode="max-autotune")
+    iqe_tensor_delta = torch.compile(iqe_tensor_delta, mode="max-autotune")
     # iqe = torch.compile(iqe, dynamic=True)
 else:
-    iqe = torch.jit.script(iqe)
-    iqe_tensor_delta = torch.jit.script(iqe_tensor_delta)
+    iqe = torch.jit.script(iqe)  # type: ignore
+    iqe_tensor_delta = torch.jit.script(iqe_tensor_delta)  # type: ignore
 
 
 class IQE(QuasimetricBase):
@@ -231,8 +246,8 @@ class IQE2(IQE):
                  ema_weight: float = 0.95):
         super().__init__(input_size, dim_per_component, transforms=transforms, reduction=reduction,
                          discount=discount, warn_if_not_quasimetric=warn_if_not_quasimetric)
-        self.component_dropout_thresh = tuple(component_dropout_thresh)
-        self.dropout_p_thresh = tuple(dropout_p_thresh)
+        self.component_dropout_thresh = tuple(component_dropout_thresh)  # type: ignore
+        self.dropout_p_thresh = tuple(dropout_p_thresh)  # type: ignore
         self.dropout_batch_frac = float(dropout_batch_frac)
         self.fake_grad = fake_grad
         assert 0 <= self.dropout_batch_frac <= 1
@@ -249,7 +264,7 @@ class IQE2(IQE):
             # )
             self.register_parameter(
                 'raw_delta',
-                torch.nn.Parameter(
+                torch.nn.Parameter(  # type: ignore
                     torch.zeros(self.latent_2d_shape).requires_grad_()
                 )
             )
@@ -270,7 +285,7 @@ class IQE2(IQE):
 
             self.register_parameter(
                 'raw_div',
-                torch.nn.Parameter(torch.zeros(self.num_components).requires_grad_())
+                torch.nn.Parameter(torch.zeros(self.num_components).requires_grad_())  # type: ignore
             )
         else:
             self.register_buffer(
@@ -285,8 +300,8 @@ class IQE2(IQE):
 
         self.div_init_mul = div_init_mul
         self.mul_kind = mul_kind
-        self.last_components = None
-        self.last_drop_p = None
+        self.last_components = None  # type: ignore
+        self.last_drop_p = None  # type: ignore
 
 
     def compute_components(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
