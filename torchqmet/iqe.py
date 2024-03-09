@@ -111,8 +111,8 @@ def is_notebook():
 
 
 if torch.__version__ >= '2.0.1' and not is_notebook():  # well, broken process pool in notebooks
-    iqe = torch.compile(iqe, mode="max-autotune")
-    iqe_tensor_delta = torch.compile(iqe_tensor_delta, mode="max-autotune")
+    iqe = torch.compile(iqe)
+    iqe_tensor_delta = torch.compile(iqe_tensor_delta)
     # iqe = torch.compile(iqe, dynamic=True)
 else:
     iqe = torch.jit.script(iqe)  # type: ignore
