@@ -54,19 +54,22 @@ class QuasimetricBase(nn.Module, metaclass=abc.ABCMeta):
         '''
         pass
 
-    def forward(self, x: torch.Tensor, y: torch.Tensor, **kwargs) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, y: torch.Tensor, *, reduced: bool = True, **kwargs) -> torch.Tensor:
         assert x.shape[-1] == y.shape[-1] == self.input_size
         d = self.compute_components(x, y, **kwargs)
         d: torch.Tensor = self.transforms(d)
         scale =  self.scale
         if not self.training:
             scale = scale.detach()
-        return self.reduction(d) * scale
+        if reduced:
+            return self.reduction(d) * scale
+        else:
+            return d * scale
 
-    def __call__(self, x: torch.Tensor, y: torch.Tensor, **kwargs) -> torch.Tensor:
+    def __call__(self, x: torch.Tensor, y: torch.Tensor, reduced: bool = True, **kwargs) -> torch.Tensor:
         # Manually define for typing
         # https://github.com/pytorch/pytorch/issues/45414
-        return super().__call__(x, y, **kwargs)
+        return super().__call__(x, y, reduced=reduced, **kwargs)
 
     def extra_repr(self) -> str:
         return f"guaranteed_quasimetric={self.guaranteed_quasimetric}\ninput_size={self.input_size}, num_components={self.num_components}" + (
@@ -79,5 +82,5 @@ from .iqe import IQE, IQE2
 from .mrn import MRN, MRNFixed
 from .neural_norms import DeepNorm, WideNorm
 
-__all__ = ['PQE', 'PQELH', 'PQEGG', 'IQE', 'MRN', 'MRNFixed', 'DeepNorm', 'WideNorm']
+__all__ = ['PQE', 'PQELH', 'PQEGG', 'IQE', 'IQE2', 'MRN', 'MRNFixed', 'DeepNorm', 'WideNorm']
 __version__ = "0.1.0"
