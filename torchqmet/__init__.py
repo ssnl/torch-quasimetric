@@ -54,19 +54,19 @@ class QuasimetricBase(nn.Module, metaclass=abc.ABCMeta):
         '''
         pass
 
-    def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, y: torch.Tensor, **kwargs) -> torch.Tensor:
         assert x.shape[-1] == y.shape[-1] == self.input_size
-        d = self.compute_components(x, y)
+        d = self.compute_components(x, y, **kwargs)
         d: torch.Tensor = self.transforms(d)
         scale =  self.scale
         if not self.training:
             scale = scale.detach()
         return self.reduction(d) * scale
 
-    def __call__(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    def __call__(self, x: torch.Tensor, y: torch.Tensor, **kwargs) -> torch.Tensor:
         # Manually define for typing
         # https://github.com/pytorch/pytorch/issues/45414
-        return super().__call__(x, y)
+        return super().__call__(x, y, **kwargs)
 
     def extra_repr(self) -> str:
         return f"guaranteed_quasimetric={self.guaranteed_quasimetric}\ninput_size={self.input_size}, num_components={self.num_components}" + (

@@ -303,7 +303,7 @@ class IQE2(IQE):
         self.last_drop_p = None  # type: ignore
 
 
-    def compute_components(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    def compute_components(self, x: torch.Tensor, y: torch.Tensor, *, symmetric_upperbound: bool = False) -> torch.Tensor:
         # if self.raw_delta is None:
         #     components = super().compute_components(x, y)
         # else:
@@ -312,6 +312,9 @@ class IQE2(IQE):
         # cap each component total to 1e3 to avoid overflow, fake gradient
         delta.data.clamp_(max=1e3 / (self.latent_2d_shape[-1] / 8))
         div_pre_f.data.clamp_(min=1e-3)
+
+        if symmetric_upperbound:
+            x, y = torch.minimum(x, y), torch.maximum(x, y)
 
         components = iqe_tensor_delta(
             x=x.unflatten(-1, self.latent_2d_shape),
