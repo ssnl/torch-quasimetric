@@ -41,7 +41,7 @@ def iqe_tensor_delta(x: torch.Tensor, y: torch.Tensor, delta: torch.Tensor, div_
         ).detach()
 
     neg_f = torch.expm1(neg_f_input)
-    neg_incf = torch.diff(neg_f, dim=-1, prepend=neg_f.narrow(-1, 0, 1))
+    neg_incf = torch.diff(neg_f, dim=-1, prepend=neg_f.new_zeros(()).expand_as(neg_f[..., :1]))
 
     # reduction
     if neg_incf.ndim == 3:
@@ -87,7 +87,7 @@ def iqe(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     # neg_inp = torch.where(neg_inp_copies == 0, 0., -delta)
     # f output: 0 -> 0, x -> 1.
     neg_f = (neg_inp_copies < 0) * (-1.)
-    neg_incf = torch.diff(neg_f, dim=-1, prepend=neg_f.narrow(-1, 0, 1))
+    neg_incf = torch.diff(neg_f, dim=-1, prepend=neg_f.new_zeros(()).expand_as(neg_f[..., :1]))
 
     # reduction
     return (sxy * neg_incf).sum(-1)
