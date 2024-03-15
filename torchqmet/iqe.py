@@ -111,11 +111,22 @@ def is_notebook():
 
 if torch.__version__ >= '2.0.1' and not is_notebook():  # well, broken process pool in notebooks
     iqe = torch.compile(iqe)
-    iqe_tensor_delta = torch.compile(iqe_tensor_delta)
+    _iqe_tensor_delta = torch.compile(iqe_tensor_delta)
+    _iqe_tensor_delta_jit = torch.jit.script(iqe_tensor_delta)
+    _default_iqe_tensor_delta_version = 'compile'
     # iqe = torch.compile(iqe, dynamic=True)
 else:
     iqe = torch.jit.script(iqe)  # type: ignore
-    iqe_tensor_delta = torch.jit.script(iqe_tensor_delta)  # type: ignore
+    _iqe_tensor_delta = None
+    _iqe_tensor_delta_jit = torch.jit.script(iqe_tensor_delta)  # type: ignore
+    _default_iqe_tensor_delta_version = 'jit'
+
+
+
+def get_iqe_tensor_delta(version):
+    fn = dict(jit=_iqe_tensor_delta_jit, compile=_iqe_tensor_delta)[version]
+    assert fn is not None, f"version={version} not supported"
+    return fn
 
 
 class IQE(QuasimetricBase):
@@ -242,7 +253,8 @@ class IQE2(IQE):
                  component_dropout_thresh: Tuple[float, float] = (0.5, 2),
                  dropout_p_thresh: Tuple[float, float] = (0.005, 0.995),
                  dropout_batch_frac: float = 0.2,
-                 ema_weight: float = 0.95):
+                 ema_weight: float = 0.95,
+                 version: Optional[str] = None):
         super().__init__(input_size, dim_per_component, transforms=transforms, reduction=reduction,
                          discount=discount, warn_if_not_quasimetric=warn_if_not_quasimetric)
         self.component_dropout_thresh = tuple(component_dropout_thresh)  # type: ignore
@@ -301,6 +313,7 @@ class IQE2(IQE):
         self.mul_kind = mul_kind
         self.last_components = None  # type: ignore
         self.last_drop_p = None  # type: ignore
+        self.version = version or _default_iqe_tensor_delta_version
 
 
     def compute_components(self, x: torch.Tensor, y: torch.Tensor, *, symmetric_upperbound: bool = False) -> torch.Tensor:
@@ -316,7 +329,7 @@ class IQE2(IQE):
         if symmetric_upperbound:
             x, y = torch.minimum(x, y), torch.maximum(x, y)
 
-        components = iqe_tensor_delta(
+        components = get_iqe_tensor_delta(self.version)(  # type: ignore
             x=x.unflatten(-1, self.latent_2d_shape),
             y=y.unflatten(-1, self.latent_2d_shape),
             delta=delta,
@@ -386,4 +399,5 @@ learned_delta={self.raw_delta is not None},
 learned_div={self.raw_div.requires_grad},
 div_init_mul={self.div_init_mul:g},
 mul_kind={self.mul_kind},
-fake_grad={self.fake_grad},"""
+fake_grad={self.fake_grad},
+version={self.version}"""
