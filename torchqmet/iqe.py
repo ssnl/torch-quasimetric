@@ -33,14 +33,15 @@ def iqe_tensor_delta(x: torch.Tensor, y: torch.Tensor, delta: torch.Tensor, div_
     # neg_incf: the **negated** increment of **output** of f at sorted locations
     neg_f_input = torch.cumsum(neg_inc, dim=-1) / div_pre_f[:, None]
 
+    neg_f = torch.expm1(neg_f_input)
     if fake_grad:
         neg_f_input__grad_path = neg_f_input.clone()
         neg_f_input__grad_path.data.clamp_(min=-15)  # fake grad
-        neg_f_input = neg_f_input__grad_path + (
-            neg_f_input - neg_f_input__grad_path
+        neg_f__grad_path = torch.expm1(neg_f_input__grad_path)
+        neg_f = neg_f__grad_path + (
+            neg_f - neg_f__grad_path
         ).detach()
 
-    neg_f = torch.expm1(neg_f_input)
     # neg_incf = torch.diff(neg_f, dim=-1, prepend=neg_f.new_zeros(()).expand_as(neg_f[..., :1]))
     neg_incf = torch.cat([neg_f.narrow(-1, 0, 1), torch.diff(neg_f, dim=-1)], dim=-1)
 
@@ -55,7 +56,16 @@ def iqe_tensor_delta(x: torch.Tensor, y: torch.Tensor, delta: torch.Tensor, div_
     elif mul_kind == 'normdiv':
         comp = comp / f_PQELH(D / 8 / div_pre_f)
     elif mul_kind == 'normdeltadiv':
-        comp = comp / f_PQELH(delta.expand(x.shape[-2:]).sum(-1) / 8 / div_pre_f)
+        norm_input = delta.expand(x.shape[-2:]).sum(-1) / 8 / div_pre_f
+        norm_output = f_PQELH(norm_input)
+        if fake_grad:
+            norm_input__grad_path = norm_input.clone()
+            norm_input__grad_path.data.clamp_(max=15)  # fake grad
+            norm_output__grad_path = f_PQELH(norm_input__grad_path)
+            norm_output = norm_output__grad_path + (
+                norm_output - norm_output__grad_path
+            ).detach()
+        comp = comp / norm_output
     elif mul_kind == 'normdiv_half':
         comp = comp * 2 / f_PQELH(D / 8 / div_pre_f)
     else:
@@ -111,7 +121,9 @@ def is_notebook():
         return True
 
 
-if torch.__version__ >= '2.0.1' and not is_notebook():  # well, broken process pool in notebooks
+if torch.__version__ >= '2.0.1' and not is_notebook() and False:  # well, broken process pool in notebooks, and breaks reproducbility!
+    # NOTE: you have every right to use torch.compile to be faster, but note that it breaks reproducibility in some cases
+    #       (e.g., see github issue http s://github.com/pytorch/pytorch/issues/94855), and this unfortunately is one such case
     iqe = torch.compile(iqe)
     _iqe_tensor_delta = torch.compile(iqe_tensor_delta)
     _iqe_tensor_delta_jit = torch.jit.script(iqe_tensor_delta)
