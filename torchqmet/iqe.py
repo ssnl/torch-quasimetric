@@ -234,7 +234,11 @@ class IQE(QuasimetricBase):
                          transforms=transforms, reduction=reduction, discount=discount)
         self.latent_2d_shape = torch.Size([num_components, dim_per_component])
 
-    def compute_components(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    def compute_components(self, x: torch.Tensor, y: torch.Tensor, symmetric_upperbound: bool = False) -> torch.Tensor:
+
+        if symmetric_upperbound:
+            x, y = torch.minimum(x, y), torch.maximum(x, y)
+
         return iqe(
             x=x.unflatten(-1, self.latent_2d_shape),
             y=y.unflatten(-1, self.latent_2d_shape),
