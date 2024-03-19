@@ -404,8 +404,8 @@ class IQE2(IQE):
 
             components = components.reshape(*bshape, self.num_components)
 
-        self.last_components = components
-        return components
+        self.last_components = components  # type: ignore
+        return components  # type: ignore
 
     def extra_repr(self) -> str:
         return super().extra_repr() + rf"""
